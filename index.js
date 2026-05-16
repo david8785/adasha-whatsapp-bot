@@ -177,7 +177,7 @@ async function createPrintOrder(conv, details) {
   const price   = details?.total_price || 0;
   const upgrade = details?.upgrade_product || null;
 
-  await storeAIxApi('entities/PrintOrder', 'POST', [{
+  await storeAIxApi('entities/PrintOrder', 'POST', {
     customer_name:            name,
     customer_phone:           conv.phone,
     image_count:              count,
@@ -191,7 +191,7 @@ async function createPrintOrder(conv, details) {
     source:                   'whatsapp',
     whatsapp_conversation_id: `wa_${conv.phone}`,
     status:                   'pending_printing',
-  }]);
+  });
 
   console.log('\n═══════════════════════════════════');
   console.log('✅ הזמנה נוצרה:');
@@ -311,3 +311,4 @@ client.on('message', async (msg) => {
 
 console.log('🚀 מאתחל — עדשה מקומית...');
 client.initialize();
+
