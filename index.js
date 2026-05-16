@@ -289,7 +289,6 @@ const client = new Client({
   }),
   puppeteer: {
     headless: true,
-    userDataDir: './.wwebjs_auth/puppeteer_profile',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -299,8 +298,6 @@ const client = new Client({
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-background-networking',
-      '--remote-debugging-port=0',
-      '--disable-features=site-per-process',
     ],
   },
 });
