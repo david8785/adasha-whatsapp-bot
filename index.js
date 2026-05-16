@@ -296,8 +296,18 @@ const client = new Client({
   authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth', clientId: 'adasha-bot' }),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-           '--disable-gpu','--no-first-run','--single-process'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox', 
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--no-first-run',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding',
+      '--disable-features=TranslateUI',
+      '--window-size=1280,720',
+    ],
   },
 });
 
