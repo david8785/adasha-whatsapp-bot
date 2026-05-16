@@ -1,3 +1,5 @@
+
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
@@ -166,9 +168,19 @@ async function createPrintOrder(conv, details) {
   const count  = conv.expectedImages || conv.imageCount || 0;
   const price  = details?.total_price || 0;
 
+  // נקה מספר טלפון
+  const cleanPhone = conv.phone.replace(/^972/, '0').replace(/\D/g, '');
+  
+  // קישורי תמונות
+  const imageUrlsList = (conv.imageUrls || []).join('\n');
+  const notesText = [
+    branch ? `סניף: ${branch}` : '',
+    imageUrlsList ? `תמונות:\n${imageUrlsList}` : ''
+  ].filter(Boolean).join('\n');
+
   const payload = {
     customer_name: name,
-    customer_phone: conv.phone,
+    customer_phone: cleanPhone,
     image_count: count,
     total_images: count,
     size: size,
@@ -176,7 +188,7 @@ async function createPrintOrder(conv, details) {
     frame: frame,
     total_price: price,
     total_amount: price,
-    notes: branch ? `סניף: ${branch}` : '',
+    notes: notesText,
     vendor_id: VENDOR_ID,
     source: 'whatsapp',
     whatsapp_conversation_id: `wa_${conv.phone}`,
@@ -235,6 +247,37 @@ client.on('message', async (msg) => {
     if (msg.hasMedia && msg.type === 'image') {
       conv.imageCount++;
       console.log(`📸 #${conv.imageCount} מ-${name || phone}`);
+      try {
+        const media = await msg.downloadMedia();
+        if (media && media.data) {
+          const imgBuffer = Buffer.from(media.data, 'base64');
+          const ext = media.mimetype.includes('jpeg') ? 'jpg' : 'png';
+          const filename = `wa_${phone}_img${conv.imageCount}.${ext}`;
+          // שמור URL לרשימה
+          if (!conv.imageUrls) conv.imageUrls = [];
+          // העלה ל-Base44
+          const FormData = require('form-data');
+          const form = new FormData();
+          form.append('file', imgBuffer, { filename, contentType: media.mimetype });
+          const uploadRes = await fetch(`https://app.base44.com/api/apps/${STOREAIX_APP_ID}/files/upload`, {
+            method: 'POST',
+            headers: { 'api-key': STOREAIX_API_KEY, ...form.getHeaders() },
+            body: form,
+          });
+          if (uploadRes.ok) {
+            const uploadData = await uploadRes.json();
+            const fileUrl = uploadData.file_url || uploadData.url || '';
+            if (fileUrl) {
+              conv.imageUrls.push(fileUrl);
+              console.log(`✅ תמונה #${conv.imageCount} הועלתה: ${fileUrl}`);
+            }
+          } else {
+            console.log(`⚠️ העלאה נכשלה: ${uploadRes.status}`);
+          }
+        }
+      } catch(imgErr) {
+        console.error('❌ שגיאת תמונה:', imgErr.message);
+      }
       return;
     }
 
