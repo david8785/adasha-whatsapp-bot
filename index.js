@@ -392,11 +392,12 @@ client.on('message', async (msg) => {
   } catch(err) { console.error('❌ שגיאה:', err.message); }
 });
 
-// מחק locks ישנים
-['/app/.wwebjs_auth/session-adasha-bot/SingletonLock',
- '/app/.wwebjs_auth/session-adasha-bot/SingletonCookie'].forEach(f => {
-  try { fs.unlinkSync(f); console.log('🗑️ מחק lock:', f); } catch(e) {}
-});
+// מחק סשן ישן לגמרי — מתחיל מחדש עם QR
+const SESSION_DIR = '/app/.wwebjs_auth/session-adasha-bot';
+if (fs.existsSync(SESSION_DIR)) {
+  fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+  console.log('🗑️ סשן ישן נמחק — יידרש QR חדש');
+}
 
 client.initialize();
 console.log('🚀 מאתחל בוט...');
