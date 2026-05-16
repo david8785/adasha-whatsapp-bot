@@ -2,8 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const Anthropic = require('@anthropic-ai/sdk');
-const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
-const fs = require('fs');
+const https = require('https');
 const http = require('http');
 const path = require('path');
 
@@ -23,6 +22,81 @@ if (!ANTHROPIC_API_KEY) {
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const conversations = {};
 let currentQR = null;
+
+// ─── HTTP request helper (no external deps) ───────────────
+function httpsRequest(url, options, bodyBuffer) {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const reqOptions = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname + urlObj.search,
+      method: options.method || 'GET',
+      headers: options.headers || {},
+    };
+    const req = https.request(reqOptions, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const body = Buffer.concat(chunks).toString('utf-8');
+        resolve({ status: res.statusCode, body });
+      });
+    });
+    req.on('error', reject);
+    if (bodyBuffer) req.write(bodyBuffer);
+    req.end();
+  });
+}
+
+// ─── storeAIx API ─────────────────────────────────────────
+async function storeAIxApi(endpoint, method = 'GET', body = null) {
+  const bodyStr = body ? JSON.stringify(body) : null;
+  const res = await httpsRequest(`${STOREAIX_BASE}/${endpoint}`, {
+    method,
+    headers: {
+      'api-key': STOREAIX_API_KEY,
+      'Content-Type': 'application/json',
+      ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
+    },
+  }, bodyStr ? Buffer.from(bodyStr) : null);
+
+  if (res.status >= 400) throw new Error(`storeAIx ${res.status}: ${res.body}`);
+  return JSON.parse(res.body);
+}
+
+// ─── Upload image to Base44 ───────────────────────────────
+async function uploadImage(imgBuffer, filename, mimetype) {
+  try {
+    const boundary = '----WaBotBoundary' + Date.now();
+    const hdr = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`
+    );
+    const ftr = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const bodyBuf = Buffer.concat([hdr, imgBuffer, ftr]);
+
+    const res = await httpsRequest(
+      `${STOREAIX_BASE}/files/upload`,
+      {
+        method: 'POST',
+        headers: {
+          'api-key': STOREAIX_API_KEY,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': bodyBuf.length,
+        },
+      },
+      bodyBuf
+    );
+
+    if (res.status === 200 || res.status === 201) {
+      const data = JSON.parse(res.body);
+      return data.file_url || data.url || null;
+    }
+    console.log(`⚠️ העלאה נכשלה ${res.status}: ${res.body.substring(0, 100)}`);
+    return null;
+  } catch (e) {
+    console.error('❌ שגיאת upload:', e.message);
+    return null;
+  }
+}
 
 // ─── HTTP Server לQR ──────────────────────────────────────
 const server = http.createServer(async (req, res) => {
@@ -52,18 +126,7 @@ const server = http.createServer(async (req, res) => {
     res.end('<h2>✅ עדשה מקומית WhatsApp Bot פעיל!</h2><p><a href="/qr" style="color:cyan">לחץ כאן לQR</a></p>');
   }
 });
-server.listen(PORT, () => console.log(`🌐 QR Server: http://localhost:${PORT}/qr`));
-
-// ─── storeAIx API ─────────────────────────────────────────
-async function storeAIxApi(endpoint, method = 'GET', body = null) {
-  const res = await fetch(`${STOREAIX_BASE}/${endpoint}`, {
-    method,
-    headers: { 'api-key': STOREAIX_API_KEY, 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error(`storeAIx ${res.status}: ${await res.text()}`);
-  return res.json();
-}
+server.listen(PORT, () => console.log(`🌐 Server: http://localhost:${PORT}`));
 
 // ─── הודעת ברכה ───────────────────────────────────────────
 function buildGreeting(name) {
@@ -92,8 +155,8 @@ const SYSTEM_PROMPT = `אתה סוכן מכירות של עדשה מקומית -
 
 שלב 1 — אחרי אישור כמות תמונות:
 "קיבלתי [X] תמונות 📸
-איזה גודל, גימור וסניף?
-• גודל: 10×15 / 13×18 / 15×21 / 20×30 / אחר
+באיזה גודל, גימור וסניף תרצה?
+• גודל: 10×15 (₪1.80) | 13×18 (₪3.50) | 15×21 (₪10) | 20×30 (₪23)
 • גימור: מבריק או מט | עם מסגרת או בלי
 • סניף: רעננה או משמר השרון"
 
@@ -120,6 +183,7 @@ function getConversation(phone, name) {
       messages: [], imageCount: 0, expectedImages: null,
       imagesConfirmed: false, size: null, paperType: null,
       frame: null, orderCreated: false, greeted: false,
+      imageUrls: [],
     };
   }
   if (name && !conversations[phone].customerName) conversations[phone].customerName = name;
@@ -147,14 +211,22 @@ function parseCompletion(text) {
 }
 
 async function extractOrderDetails(conv) {
-  const history = conv.messages.slice(-20).map(m => `${m.role === 'user' ? 'לקוח' : 'חנות'}: ${m.content}`).join('\n');
+  const history = conv.messages.slice(-20).map(m =>
+    `${m.role === 'user' ? 'לקוח' : 'חנות'}: ${m.content}`
+  ).join('\n');
+
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5', max_tokens: 400,
     system: 'Extract print order details from Hebrew WhatsApp conversation. Return ONLY valid JSON.',
     messages: [{ role: 'user', content: `שם: ${conv.customerName} | סניף: ${conv.branch}\nשיחה:\n${history}\nJSON: {"customer_name":"...","branch":"...","size":"...","paper_type":"מבריק/מט","frame":true/false,"image_count":0,"total_price":0,"upgrade_product":null}` }]
   });
-  try { return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, '')); }
-  catch(e) { console.error('❌ JSON parse:', e.message); return null; }
+
+  try {
+    return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, ''));
+  } catch(e) {
+    console.error('❌ JSON parse:', e.message);
+    return null;
+  }
 }
 
 async function createPrintOrder(conv, details) {
@@ -166,15 +238,14 @@ async function createPrintOrder(conv, details) {
   const count  = conv.expectedImages || conv.imageCount || 0;
   const price  = details?.total_price || 0;
 
-  // נקה מספר טלפון
+  // נקה מספר טלפון לפורמט ישראלי
   const cleanPhone = conv.phone.replace(/^972/, '0').replace(/\D/g, '');
-  
-  // קישורי תמונות
-  const imageUrlsList = (conv.imageUrls || []).join('\n');
-  const notesText = [
-    branch ? `סניף: ${branch}` : '',
-    imageUrlsList ? `תמונות:\n${imageUrlsList}` : ''
-  ].filter(Boolean).join('\n');
+
+  // בנה notes עם קישורי תמונות
+  const imagesList = conv.imageUrls.length > 0
+    ? `\nתמונות (${conv.imageUrls.length}):\n` + conv.imageUrls.join('\n')
+    : '';
+  const notesText = [branch ? `סניף: ${branch}` : '', imagesList].filter(Boolean).join('\n');
 
   const payload = {
     customer_name: name,
@@ -193,9 +264,9 @@ async function createPrintOrder(conv, details) {
     status: 'pending_printing',
   };
 
-  console.log('📦 יוצר הזמנה:', JSON.stringify(payload));
+  console.log('📦 יוצר הזמנה:', JSON.stringify(payload).substring(0, 200));
   await storeAIxApi('entities/PrintOrder', 'POST', payload);
-  console.log(`✅ הזמנה נוצרה: ${name} | ${count} תמונות | ${size} | ₪${price}`);
+  console.log(`✅ הזמנה נוצרה: ${name} | ${cleanPhone} | ${count} תמונות | ${size} | ₪${price}`);
 }
 
 async function getAIResponse(conv, userMessage) {
@@ -222,8 +293,7 @@ const client = new Client({
 client.on('qr', (qr) => {
   currentQR = qr;
   console.log('\n══════════════════════════════════════════');
-  console.log('   📱 QR מוכן! פתח בדפדפן:');
-  console.log('   /qr :URL');
+  console.log('   📱 QR מוכן! פתח בדפדפן: /qr');
   console.log('══════════════════════════════════════════\n');
   qrcode.generate(qr, { small: true });
 });
@@ -231,7 +301,10 @@ client.on('qr', (qr) => {
 client.on('authenticated', () => { currentQR = null; console.log('🔐 אומת בהצלחה!'); });
 client.on('ready', () => { currentQR = null; console.log('\n✅ Bot מוכן — עדשה מקומית\n'); });
 client.on('auth_failure', msg => console.error('❌ אימות נכשל:', msg));
-client.on('disconnected', reason => { console.warn('⚠️ התנתק:', reason); setTimeout(() => client.initialize(), 10000); });
+client.on('disconnected', reason => {
+  console.warn('⚠️ התנתק:', reason);
+  setTimeout(() => client.initialize(), 10000);
+});
 
 client.on('message', async (msg) => {
   try {
@@ -242,6 +315,7 @@ client.on('message', async (msg) => {
     const name = contact.pushname || contact.name || null;
     const conv = getConversation(phone, name);
 
+    // טיפול בתמונות
     if (msg.hasMedia && msg.type === 'image') {
       conv.imageCount++;
       console.log(`📸 #${conv.imageCount} מ-${name || phone}`);
@@ -251,27 +325,10 @@ client.on('message', async (msg) => {
           const imgBuffer = Buffer.from(media.data, 'base64');
           const ext = media.mimetype.includes('jpeg') ? 'jpg' : 'png';
           const filename = `wa_${phone}_img${conv.imageCount}.${ext}`;
-          // שמור URL לרשימה
-          if (!conv.imageUrls) conv.imageUrls = [];
-          // העלה ל-Base44 (multipart ידני)
-          const boundary = '----WaBotBoundary' + Date.now();
-          const hdr = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${media.mimetype}\r\n\r\n`);
-          const ftr = Buffer.from(`\r\n--${boundary}--\r\n`);
-          const bodyBuf = Buffer.concat([hdr, imgBuffer, ftr]);
-          const uploadRes = await fetch(`https://app.base44.com/api/apps/${STOREAIX_APP_ID}/files/upload`, {
-            method: 'POST',
-            headers: { 'api-key': STOREAIX_API_KEY, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-            body: bodyBuf,
-          });
-          if (uploadRes.ok) {
-            const uploadData = await uploadRes.json();
-            const fileUrl = uploadData.file_url || uploadData.url || '';
-            if (fileUrl) {
-              conv.imageUrls.push(fileUrl);
-              console.log(`✅ תמונה #${conv.imageCount} הועלתה: ${fileUrl}`);
-            }
-          } else {
-            console.log(`⚠️ העלאה נכשלה: ${uploadRes.status}`);
+          const fileUrl = await uploadImage(imgBuffer, filename, media.mimetype);
+          if (fileUrl) {
+            conv.imageUrls.push(fileUrl);
+            console.log(`✅ תמונה #${conv.imageCount} הועלתה`);
           }
         }
       } catch(imgErr) {
@@ -287,7 +344,7 @@ client.on('message', async (msg) => {
     // reset שיחה
     if (text.toLowerCase() === 'reset' || text === 'איפוס') {
       delete conversations[phone];
-      await msg.reply('✅ השיחה אופסה. שלח שלום כדי להתחיל מחדש.');
+      await msg.reply('✅ השיחה אופסה.');
       return;
     }
 
@@ -303,9 +360,8 @@ client.on('message', async (msg) => {
     if (declared !== null && !conv.imagesConfirmed) {
       conv.expectedImages = declared;
       conv.imagesConfirmed = true;
-      // שלח הודעה ישירה לבחירת גודל/גימור/סניף
       const orderMsg = `קיבלתי ${declared} תמונות! 📸
-      
+
 באיזה גודל, גימור וסניף תרצה?
 • גודל: 10×15 (₪1.80) | 13×18 (₪3.50) | 15×21 (₪10) | 20×30 (₪23)
 • גימור: מבריק או מט | עם מסגרת או בלי
@@ -334,5 +390,3 @@ client.on('message', async (msg) => {
 });
 
 client.initialize();
-
-
