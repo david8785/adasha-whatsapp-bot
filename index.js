@@ -1,7 +1,11 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+const QRCode = require('qrcode');
 const Anthropic = require('@anthropic-ai/sdk');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+const fs = require('fs');
+const http = require('http');
+const path = require('path');
 
 // ─── הגדרות ───────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -9,6 +13,7 @@ const STOREAIX_API_KEY  = process.env.STOREAIX_API_KEY  || 'edb109158f6144d0a5e8
 const STOREAIX_APP_ID   = process.env.STOREAIX_APP_ID   || '68db904e3c792b7c9cbaba20';
 const VENDOR_ID         = process.env.VENDOR_ID         || '690aee7a415f7dff3d5525d8';
 const STOREAIX_BASE     = `https://app.base44.com/api/apps/${STOREAIX_APP_ID}`;
+const PORT              = process.env.PORT || 3000;
 
 if (!ANTHROPIC_API_KEY) {
   console.error('❌ חסר ANTHROPIC_API_KEY');
@@ -17,6 +22,37 @@ if (!ANTHROPIC_API_KEY) {
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const conversations = {};
+let currentQR = null;
+
+// ─── HTTP Server לQR ──────────────────────────────────────
+const server = http.createServer(async (req, res) => {
+  if (req.url === '/qr') {
+    if (!currentQR) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end('<h2>✅ הבוט כבר מחובר! אין צורך בQR.</h2>');
+      return;
+    }
+    try {
+      const qrImage = await QRCode.toDataURL(currentQR, { width: 400 });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`
+        <html><body style="text-align:center; font-family:Arial; background:#111; color:#fff">
+        <h2>📱 סרוק עם WhatsApp</h2>
+        <p>WhatsApp → מכשירים מקושרים → קשר מכשיר</p>
+        <img src="${qrImage}" style="border:4px solid white; border-radius:8px"/>
+        <p>הדף מתרענן אוטומטית כל 15 שניות</p>
+        <script>setTimeout(()=>location.reload(), 15000)</script>
+        </body></html>
+      `);
+    } catch(e) {
+      res.writeHead(500); res.end('Error: ' + e.message);
+    }
+  } else {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<h2>✅ עדשה מקומית WhatsApp Bot פעיל!</h2><p><a href="/qr" style="color:cyan">לחץ כאן לQR</a></p>');
+  }
+});
+server.listen(PORT, () => console.log(`🌐 QR Server: http://localhost:${PORT}/qr`));
 
 // ─── storeAIx API ─────────────────────────────────────────
 async function storeAIxApi(endpoint, method = 'GET', body = null) {
@@ -29,7 +65,7 @@ async function storeAIxApi(endpoint, method = 'GET', body = null) {
   return res.json();
 }
 
-// ─── הודעת ברכה קבועה ─────────────────────────────────────
+// ─── הודעת ברכה ───────────────────────────────────────────
 function buildGreeting(name) {
   return `שלום${name ? ' ' + name : ''}! 😊
 ברוכים הבאים לעדשה מקומית 📸
@@ -54,160 +90,108 @@ const SYSTEM_PROMPT = `אתה סוכן מכירות של עדשה מקומית -
 
 סניפים: רעננה | משמר השרון
 
-━━━━━━━━━━━━━━━━━━━━━━
-שלב 1 — אחרי אישור כמות תמונות (שאלה אחת משולבת):
+שלב 1 — אחרי אישור כמות תמונות:
 "קיבלתי [X] תמונות 📸
 איזה גודל, גימור וסניף?
 • גודל: 10×15 / 13×18 / 15×21 / 20×30 / אחר
 • גימור: מבריק או מט | עם מסגרת או בלי
 • סניף: רעננה או משמר השרון"
 
-שלב 2 — אחרי שהלקוח ענה, חשב מחיר וכתוב סיכום:
+שלב 2 — אחרי שהלקוח ענה, חשב מחיר:
 "סיכום:
 [X] תמונות | [גודל] | [גימור] | [סניף]
 💰 סה"כ ₪[מחיר]
+להוסיף שדרוג? (בלוק עץ / מגנט / קנבס)"
 
-[שדרוג אחד קצר בלבד]:
-• ילדים/נכדים → בלוק עץ 13×18 ₪75 😊
-• זוגי/רומנטי → קנבס 30×40 ₪180 😊
-• כללי → מגנט ₪10 😊
-להוסיף?"
-
-שלב 3 — אחרי תשובת לקוח:
+שלב 3 — אחרי אישור:
 "ההזמנה התקבלה 🎉 ניצור קשר כשמוכן!"
 
-━━━━━━━━━━━━━━━━━━━━━━
 כללים:
 - אל תשאל שם
 - אל תגיב על תמונות
 - אל תכתוב "ההזמנה התקבלה" לפני שיש גודל + גימור + סניף
 - תמונות מעל 15×21 → https://www.adsale.co.il`;
 
-// ─── שיחה ────────────────────────────────────────────────
+// ─── שיחה ─────────────────────────────────────────────────
 function getConversation(phone, name) {
   if (!conversations[phone]) {
     conversations[phone] = {
-      phone,
-      customerName:    name || null,
-      branch:          null,
-      messages:        [],
-      imageCount:      0,
-      expectedImages:  null,
-      imagesConfirmed: false,
-      size:            null,
-      paperType:       null,
-      frame:           null,
-      orderCreated:    false,
-      greeted:         false,
+      phone, customerName: name || null, branch: null,
+      messages: [], imageCount: 0, expectedImages: null,
+      imagesConfirmed: false, size: null, paperType: null,
+      frame: null, orderCreated: false, greeted: false,
     };
   }
-  if (name && !conversations[phone].customerName) {
-    conversations[phone].customerName = name;
-  }
+  if (name && !conversations[phone].customerName) conversations[phone].customerName = name;
   return conversations[phone];
 }
 
-// ─── חילוץ פרטים מטקסט ───────────────────────────────────
 function extractFromMessage(conv, text) {
   if (!conv.branch) {
-    if (text.includes('רעננה'))                          conv.branch = 'רעננה';
+    if (text.includes('רעננה')) conv.branch = 'רעננה';
     if (text.includes('משמר') || text.includes('השרון')) conv.branch = 'משמר השרון';
   }
-  if (text.includes('מבריק'))                            conv.paperType = 'מבריק';
-  if (text.includes('מט') && !text.includes('מטר'))      conv.paperType = 'מט';
-  if (text.includes('עם מסגרת'))                         conv.frame = true;
-  if (text.includes('בלי') || text.includes('ללא'))      conv.frame = false;
+  if (text.includes('מבריק')) conv.paperType = 'מבריק';
+  if (text.includes('מט') && !text.includes('מטר')) conv.paperType = 'מט';
+  if (text.includes('עם מסגרת')) conv.frame = true;
+  if (text.includes('בלי') || text.includes('ללא')) conv.frame = false;
   const sz = text.match(/(\d+)\s*[xX×]\s*(\d+)/);
   if (sz && !conv.size) conv.size = `${sz[1]}x${sz[2]}`;
 }
 
-// ─── זיהוי "סיום X" ───────────────────────────────────────
 function parseCompletion(text) {
   if (!text) return null;
-  const patterns = [
-    /סיום\s*(\d+)/,
-    /זהו\s*(\d+)/,
-    /זה הכל\s*(\d+)/,
-    /סה"כ\s*(\d+)/,
-    /(\d+)\s*זה הכל/,
-    /(\d+)\s*תמונות?\s*(סיום|זהו|הכל)/,
-    /שלחתי\s*(\d+)/,
-  ];
-  for (const p of patterns) {
-    const m = text.match(p);
-    if (m) return parseInt(m[1]);
-  }
+  const patterns = [/סיום\s*(\d+)/, /זהו\s*(\d+)/, /זה הכל\s*(\d+)/, /שלחתי\s*(\d+)/, /(\d+)\s*תמונות/];
+  for (const p of patterns) { const m = text.match(p); if (m) return parseInt(m[1]); }
   return null;
 }
 
-// ─── חילוץ הזמנה עם AI ────────────────────────────────────
 async function extractOrderDetails(conv) {
-  const history = conv.messages.slice(-30)
-    .map(m => `${m.role === 'user' ? 'לקוח' : 'חנות'}: ${m.content}`)
-    .join('\n');
-
+  const history = conv.messages.slice(-20).map(m => `${m.role === 'user' ? 'לקוח' : 'חנות'}: ${m.content}`).join('\n');
   const resp = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 400,
-    system: 'Extract print order from Hebrew WhatsApp. Return ONLY valid JSON, no markdown.',
-    messages: [{
-      role: 'user',
-      content: `שם: ${conv.customerName} | סניף: ${conv.branch}
-שיחה:\n${history}
-JSON: {"customer_name":"...","branch":"...","size":"...","paper_type":"מבריק/מט","frame":true/false,"image_count":0,"total_price":0,"upgrade_product":null}`
-    }]
+    model: 'claude-haiku-4-5', max_tokens: 400,
+    system: 'Extract print order details from Hebrew WhatsApp conversation. Return ONLY valid JSON.',
+    messages: [{ role: 'user', content: `שם: ${conv.customerName} | סניף: ${conv.branch}\nשיחה:\n${history}\nJSON: {"customer_name":"...","branch":"...","size":"...","paper_type":"מבריק/מט","frame":true/false,"image_count":0,"total_price":0,"upgrade_product":null}` }]
   });
-
-  try {
-    return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, ''));
-  } catch (e) {
-    console.error('❌ JSON:', e.message);
-    return null;
-  }
+  try { return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, '')); }
+  catch(e) { console.error('❌ JSON parse:', e.message); return null; }
 }
 
-// ─── יצירת הזמנה ─────────────────────────────────────────
 async function createPrintOrder(conv, details) {
-  const name    = conv.customerName   || details?.customer_name   || 'לקוח WhatsApp';
-  const branch  = conv.branch         || details?.branch          || null;
-  const size    = conv.size           || details?.size            || '13x18';
-  const paper   = conv.paperType      || details?.paper_type      || 'מבריק';
-  const frame   = conv.frame          ?? details?.frame           ?? false;
-  const count   = conv.expectedImages || conv.imageCount          || 0;
-  const price   = details?.total_price || 0;
-  const upgrade = details?.upgrade_product || null;
+  const name   = conv.customerName || details?.customer_name || 'לקוח WhatsApp';
+  const branch = conv.branch || details?.branch || null;
+  const size   = conv.size || details?.size || '13x18';
+  const paper  = conv.paperType || details?.paper_type || 'מבריק';
+  const frame  = conv.frame ?? details?.frame ?? false;
+  const count  = conv.expectedImages || conv.imageCount || 0;
+  const price  = details?.total_price || 0;
 
-  await storeAIxApi('entities/PrintOrder', 'POST', {
-    customer_name:            name,
-    customer_phone:           conv.phone,
-    image_count:              count,
-    total_images:             count,
-    size, paper_type: paper, frame,
-    total_price:              price,
-    total_amount:             price,
-    upgrade_product:          upgrade,
-    notes:                    branch ? `סניף: ${branch}` : '',
-    vendor_id:                VENDOR_ID,
-    source:                   'whatsapp',
+  const payload = {
+    customer_name: name,
+    customer_phone: conv.phone,
+    image_count: count,
+    total_images: count,
+    size: size,
+    paper_type: paper,
+    frame: frame,
+    total_price: price,
+    total_amount: price,
+    notes: branch ? `סניף: ${branch}` : '',
+    vendor_id: VENDOR_ID,
+    source: 'whatsapp',
     whatsapp_conversation_id: `wa_${conv.phone}`,
-    status:                   'pending_printing',
-  });
+    status: 'pending_printing',
+  };
 
-  console.log('\n═══════════════════════════════════');
-  console.log('✅ הזמנה נוצרה:');
-  console.log(`   👤 ${name} | 📞 ${conv.phone}`);
-  console.log(`   📍 ${branch || 'לא צוין'} | 📸 ${count} תמונות`);
-  console.log(`   📐 ${size} | 🖨️  ${paper} | 🖼️  ${frame ? 'עם מסגרת' : 'בלי מסגרת'}`);
-  console.log(`   💰 ₪${price} | 🎁 ${upgrade || 'ללא שדרוג'}`);
-  console.log('═══════════════════════════════════\n');
+  console.log('📦 יוצר הזמנה:', JSON.stringify(payload));
+  await storeAIxApi('entities/PrintOrder', 'POST', payload);
+  console.log(`✅ הזמנה נוצרה: ${name} | ${count} תמונות | ${size} | ₪${price}`);
 }
 
-// ─── AI response ──────────────────────────────────────────
 async function getAIResponse(conv, userMessage) {
   conv.messages.push({ role: 'user', content: userMessage });
   const resp = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 300,
+    model: 'claude-haiku-4-5', max_tokens: 300,
     system: SYSTEM_PROMPT,
     messages: conv.messages.map(m => ({ role: m.role, content: m.content })),
   });
@@ -226,44 +210,38 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
+  currentQR = qr;
   console.log('\n══════════════════════════════════════════');
-  console.log('   📱 סרוק QR: WhatsApp → מכשירים מקושרים');
+  console.log('   📱 QR מוכן! פתח בדפדפן:');
+  console.log('   /qr :URL');
   console.log('══════════════════════════════════════════\n');
   qrcode.generate(qr, { small: true });
 });
 
-client.on('authenticated', () => console.log('🔐 אומת!'));
-client.on('ready', () => {
-  console.log('\n✅ Bot מוכן — עדשה מקומית');
-  console.log('   סניפים: רעננה | משמר השרון\n');
-});
+client.on('authenticated', () => { currentQR = null; console.log('🔐 אומת בהצלחה!'); });
+client.on('ready', () => { currentQR = null; console.log('\n✅ Bot מוכן — עדשה מקומית\n'); });
 client.on('auth_failure', msg => console.error('❌ אימות נכשל:', msg));
-client.on('disconnected', reason => {
-  console.warn('⚠️ התנתק:', reason);
-  setTimeout(() => client.initialize(), 10000);
-});
+client.on('disconnected', reason => { console.warn('⚠️ התנתק:', reason); setTimeout(() => client.initialize(), 10000); });
 
-// ─── הודעות נכנסות ────────────────────────────────────────
 client.on('message', async (msg) => {
   try {
     if (msg.from.includes('@g.us') || msg.from === 'status@broadcast') return;
 
-    const phone   = msg.from.replace('@c.us', '');
+    const phone = msg.from.replace('@c.us', '');
     const contact = await msg.getContact();
-    const name    = contact.pushname || contact.name || null;
-    const conv    = getConversation(phone, name);
+    const name = contact.pushname || contact.name || null;
+    const conv = getConversation(phone, name);
 
-    // ── תמונה: שקט מוחלט ──────────────────────────────────
     if (msg.hasMedia && msg.type === 'image') {
       conv.imageCount++;
       console.log(`📸 #${conv.imageCount} מ-${name || phone}`);
       return;
     }
 
-    const text = msg.body || '';
+    const text = (msg.body || '').trim();
+    if (!text) return;
     console.log(`💬 ${name || phone}: ${text}`);
 
-    // ── ברכה ראשונה ───────────────────────────────────────
     if (!conv.greeted) {
       conv.greeted = true;
       await msg.reply(buildGreeting(name));
@@ -272,43 +250,31 @@ client.on('message', async (msg) => {
 
     extractFromMessage(conv, text);
 
-    // ── סיום X ────────────────────────────────────────────
     const declared = parseCompletion(text);
     if (declared !== null && !conv.imagesConfirmed) {
       conv.expectedImages = declared;
-      console.log(`🔢 הצהיר ${declared} | התקבלו ${conv.imageCount}`);
-
-      if (conv.imageCount >= declared) {
-        conv.imagesConfirmed = true;
-        const reply = await getAIResponse(
-          conv,
-          `[סיום: ${declared} תמונות אושרו. שאל גודל + גימור + סניף בהודעה אחת.]`
-        );
-        await msg.reply(reply);
-      } else {
-        const missing = declared - conv.imageCount;
-        await msg.reply(
-          `קיבלתי ${conv.imageCount} מתוך ${declared} תמונות 📸\nממתין ל-${missing} נוספות...\nכשסיימת כתוב/י שוב *סיום ${declared}*`
-        );
-      }
+      conv.imagesConfirmed = true;
+      const reply = await getAIResponse(conv, `[סיום: הלקוח הצהיר ${declared} תמונות, התקבלו ${conv.imageCount}]`);
+      await msg.reply(reply);
       return;
     }
 
-    // ── הודעה רגילה → AI ──────────────────────────────────
     const reply = await getAIResponse(conv, text);
-    await msg.reply(reply);
 
     if (reply.includes('ההזמנה התקבלה') && !conv.orderCreated) {
       conv.orderCreated = true;
-      const details = await extractOrderDetails(conv);
-      await createPrintOrder(conv, details);
+      try {
+        const details = await extractOrderDetails(conv);
+        await createPrintOrder(conv, details);
+      } catch(e) {
+        console.error('❌ שגיאה ביצירת הזמנה:', e.message);
+      }
     }
 
-  } catch (err) {
+    await msg.reply(reply);
+  } catch(err) {
     console.error('❌ שגיאה:', err.message);
   }
 });
 
-console.log('🚀 מאתחל — עדשה מקומית...');
 client.initialize();
-
