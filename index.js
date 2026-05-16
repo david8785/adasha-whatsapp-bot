@@ -253,14 +253,15 @@ client.on('message', async (msg) => {
           const filename = `wa_${phone}_img${conv.imageCount}.${ext}`;
           // שמור URL לרשימה
           if (!conv.imageUrls) conv.imageUrls = [];
-          // העלה ל-Base44
-          const FormData = require('form-data');
-          const form = new FormData();
-          form.append('file', imgBuffer, { filename, contentType: media.mimetype });
+          // העלה ל-Base44 (multipart ידני)
+          const boundary = '----WaBotBoundary' + Date.now();
+          const hdr = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${media.mimetype}\r\n\r\n`);
+          const ftr = Buffer.from(`\r\n--${boundary}--\r\n`);
+          const bodyBuf = Buffer.concat([hdr, imgBuffer, ftr]);
           const uploadRes = await fetch(`https://app.base44.com/api/apps/${STOREAIX_APP_ID}/files/upload`, {
             method: 'POST',
-            headers: { 'api-key': STOREAIX_API_KEY, ...form.getHeaders() },
-            body: form,
+            headers: { 'api-key': STOREAIX_API_KEY, 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+            body: bodyBuf,
           });
           if (uploadRes.ok) {
             const uploadData = await uploadRes.json();
