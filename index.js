@@ -292,10 +292,10 @@ const client = new Client({
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-extensions',
-      '--disable-background-networking',
       '--no-first-run',
       '--no-default-browser-check',
-      '--single-process',
+      '--disable-background-networking',
+      '--remote-debugging-port=0',
     ],
   },
 });
@@ -398,5 +398,17 @@ client.on('message', async (msg) => {
     console.error('❌ שגיאה:', err.message);
   }
 });
+
+// מחק lock files ישנים לפני initialize
+const fs = require('fs');
+const authPath = './.wwebjs_auth';
+try {
+  const lockFiles = [
+    `${authPath}/session/SingletonLock`,
+    `${authPath}/session/SingletonCookie`,
+    `${authPath}/session/SingletonSocket`,
+  ];
+  lockFiles.forEach(f => { try { fs.unlinkSync(f); console.log('🗑️ מחק lock:', f); } catch(e) {} });
+} catch(e) {}
 
 client.initialize();
