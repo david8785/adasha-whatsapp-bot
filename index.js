@@ -254,8 +254,15 @@ client.on('message', async (msg) => {
     if (declared !== null && !conv.imagesConfirmed) {
       conv.expectedImages = declared;
       conv.imagesConfirmed = true;
-      const reply = await getAIResponse(conv, `[סיום: הלקוח הצהיר ${declared} תמונות, התקבלו ${conv.imageCount}]`);
-      await msg.reply(reply);
+      // שלח הודעה ישירה לבחירת גודל/גימור/סניף
+      const orderMsg = `קיבלתי ${declared} תמונות! 📸
+      
+באיזה גודל, גימור וסניף תרצה?
+• גודל: 10×15 (₪1.80) | 13×18 (₪3.50) | 15×21 (₪10) | 20×30 (₪23)
+• גימור: מבריק או מט | עם מסגרת או בלי
+• סניף: רעננה או משמר השרון`;
+      conv.messages.push({ role: 'assistant', content: orderMsg });
+      await msg.reply(orderMsg);
       return;
     }
 
@@ -278,3 +285,4 @@ client.on('message', async (msg) => {
 });
 
 client.initialize();
+
