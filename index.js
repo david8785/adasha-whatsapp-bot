@@ -242,6 +242,13 @@ client.on('message', async (msg) => {
     if (!text) return;
     console.log(`💬 ${name || phone}: ${text}`);
 
+    // reset שיחה
+    if (text.toLowerCase() === 'reset' || text === 'איפוס') {
+      delete conversations[phone];
+      await msg.reply('✅ השיחה אופסה. שלח שלום כדי להתחיל מחדש.');
+      return;
+    }
+
     if (!conv.greeted) {
       conv.greeted = true;
       await msg.reply(buildGreeting(name));
@@ -285,4 +292,5 @@ client.on('message', async (msg) => {
 });
 
 client.initialize();
+
 
