@@ -5,6 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const https = require('https');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
 
 // ─── הגדרות ───────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -13,33 +14,30 @@ const STOREAIX_APP_ID   = process.env.STOREAIX_APP_ID   || '68db904e3c792b7c9cba
 const VENDOR_ID         = process.env.VENDOR_ID         || '690aee7a415f7dff3d5525d8';
 const STOREAIX_BASE     = `https://app.base44.com/api/apps/${STOREAIX_APP_ID}`;
 const PORT              = process.env.PORT || 3000;
+const IMAGES_DIR        = '/app/images'; // Railway volume
 
-if (!ANTHROPIC_API_KEY) {
-  console.error('❌ חסר ANTHROPIC_API_KEY');
-  process.exit(1);
-}
+if (!ANTHROPIC_API_KEY) { console.error('❌ חסר ANTHROPIC_API_KEY'); process.exit(1); }
+
+// צור תיקיית תמונות אם לא קיימת
+if (!fs.existsSync(IMAGES_DIR)) { fs.mkdirSync(IMAGES_DIR, { recursive: true }); }
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const conversations = {};
 let currentQR = null;
 
-// ─── HTTP request helper (no external deps) ───────────────
+// ─── HTTP request helper ───────────────────────────────────
 function httpsRequest(url, options, bodyBuffer) {
   return new Promise((resolve, reject) => {
     const urlObj = new URL(url);
-    const reqOptions = {
+    const req = https.request({
       hostname: urlObj.hostname,
       path: urlObj.pathname + urlObj.search,
       method: options.method || 'GET',
       headers: options.headers || {},
-    };
-    const req = https.request(reqOptions, (res) => {
+    }, (res) => {
       const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => {
-        const body = Buffer.concat(chunks).toString('utf-8');
-        resolve({ status: res.statusCode, body });
-      });
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf-8') }));
     });
     req.on('error', reject);
     if (bodyBuffer) req.write(bodyBuffer);
@@ -58,50 +56,26 @@ async function storeAIxApi(endpoint, method = 'GET', body = null) {
       ...(bodyStr ? { 'Content-Length': Buffer.byteLength(bodyStr) } : {}),
     },
   }, bodyStr ? Buffer.from(bodyStr) : null);
-
-  if (res.status >= 400) throw new Error(`storeAIx ${res.status}: ${res.body}`);
+  if (res.status >= 400) throw new Error(`storeAIx ${res.status}: ${res.body.substring(0,200)}`);
   return JSON.parse(res.body);
 }
 
-// ─── Upload image to Base44 ───────────────────────────────
-async function uploadImage(imgBuffer, filename, mimetype) {
-  try {
-    // העלאה ל-Litterbox (חינמי, 72 שעות, ללא API key)
-    const boundary = '----LitterboxBoundary' + Date.now();
-    const part1 = Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n` +
-      `--${boundary}\r\nContent-Disposition: form-data; name="time"\r\n\r\n72h\r\n` +
-      `--${boundary}\r\nContent-Disposition: form-data; name="fileToUpload"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`
-    );
-    const part2 = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const bodyBuf = Buffer.concat([part1, imgBuffer, part2]);
-
-    const res = await httpsRequest(
-      'https://litterbox.catbox.moe/resources/internals/api.php',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': bodyBuf.length,
-        },
-      },
-      bodyBuf
-    );
-
-    if (res.status === 200 && res.body.startsWith('https://')) {
-      return res.body.trim();
-    }
-    console.log(`⚠️ Litterbox נכשל ${res.status}: ${res.body.substring(0, 100)}`);
-    return null;
-  } catch (e) {
-    console.error('❌ שגיאת upload:', e.message);
-    return null;
-  }
+// ─── שמירת תמונה ל-Railway volume ────────────────────────
+function saveImageLocally(phone, imgBuffer, ext) {
+  const phoneDir = path.join(IMAGES_DIR, phone.replace(/\D/g, ''));
+  if (!fs.existsSync(phoneDir)) fs.mkdirSync(phoneDir, { recursive: true });
+  const filename = `img_${Date.now()}.${ext}`;
+  const filepath = path.join(phoneDir, filename);
+  fs.writeFileSync(filepath, imgBuffer);
+  return filepath;
 }
 
-// ─── HTTP Server לQR ──────────────────────────────────────
+// ─── HTTP Server ───────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
-  if (req.url === '/qr') {
+  const url = req.url;
+
+  // QR page
+  if (url === '/qr') {
     if (!currentQR) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end('<h2>✅ הבוט כבר מחובר! אין צורך בQR.</h2>');
@@ -110,22 +84,67 @@ const server = http.createServer(async (req, res) => {
     try {
       const qrImage = await QRCode.toDataURL(currentQR, { width: 400 });
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`
-        <html><body style="text-align:center; font-family:Arial; background:#111; color:#fff">
+      res.end(`<html><body style="text-align:center;background:#111;color:#fff">
         <h2>📱 סרוק עם WhatsApp</h2>
-        <p>WhatsApp → מכשירים מקושרים → קשר מכשיר</p>
-        <img src="${qrImage}" style="border:4px solid white; border-radius:8px"/>
-        <p>הדף מתרענן אוטומטית כל 15 שניות</p>
-        <script>setTimeout(()=>location.reload(), 15000)</script>
-        </body></html>
-      `);
-    } catch(e) {
-      res.writeHead(500); res.end('Error: ' + e.message);
-    }
-  } else {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end('<h2>✅ עדשה מקומית WhatsApp Bot פעיל!</h2><p><a href="/qr" style="color:cyan">לחץ כאן לQR</a></p>');
+        <img src="${qrImage}" style="border:4px solid white"/>
+        <script>setTimeout(()=>location.reload(),15000)</script>
+        </body></html>`);
+    } catch(e) { res.writeHead(500); res.end('Error'); }
+    return;
   }
+
+  // הורדת ZIP של תמונות לפי טלפון: /download/0521234567
+  if (url.startsWith('/download/')) {
+    const phone = url.split('/download/')[1].replace(/\D/g, '');
+    const phoneDir = path.join(IMAGES_DIR, phone);
+    if (!fs.existsSync(phoneDir)) {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<h3>❌ לא נמצאו תמונות עבור ${phone}</h3>`);
+      return;
+    }
+    const files = fs.readdirSync(phoneDir).filter(f => /\.(jpg|jpeg|png|gif)$/i.test(f));
+    if (files.length === 0) {
+      res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<h3>❌ אין תמונות עבור ${phone}</h3>`);
+      return;
+    }
+
+    // בנה ZIP בסיסי
+    const { buildZip } = require('./zipBuilder');
+    const fileEntries = files.map(f => ({
+      name: f,
+      data: fs.readFileSync(path.join(phoneDir, f))
+    }));
+    const zipBuf = buildZip(fileEntries);
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': `attachment; filename="${phone}_${files.length}photos.zip"`,
+      'Content-Length': zipBuf.length,
+    });
+    res.end(zipBuf);
+    return;
+  }
+
+  // רשימת לקוחות עם תמונות: /images
+  if (url === '/images') {
+    if (!fs.existsSync(IMAGES_DIR)) { res.writeHead(200,'text/html'); res.end('<p>אין תמונות</p>'); return; }
+    const dirs = fs.readdirSync(IMAGES_DIR).filter(d => fs.statSync(path.join(IMAGES_DIR,d)).isDirectory());
+    const rows = dirs.map(d => {
+      const count = fs.readdirSync(path.join(IMAGES_DIR,d)).length;
+      return `<tr><td>${d}</td><td>${count} תמונות</td><td><a href="/download/${d}">⬇️ הורד ZIP</a></td></tr>`;
+    }).join('');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<html><body dir="rtl" style="font-family:Arial;padding:20px">
+      <h2>📁 תמונות לקוחות</h2>
+      <table border="1" cellpadding="8"><tr><th>טלפון</th><th>תמונות</th><th>הורדה</th></tr>
+      ${rows || '<tr><td colspan=3>אין תמונות עדיין</td></tr>'}
+      </table></body></html>`);
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<h2>✅ עדשה מקומית Bot פעיל</h2>
+    <p><a href="/qr">📱 QR</a> | <a href="/images">📁 תמונות</a></p>`);
 });
 server.listen(PORT, () => console.log(`🌐 Server: http://localhost:${PORT}`));
 
@@ -134,9 +153,9 @@ function buildGreeting(name) {
   return `שלום${name ? ' ' + name : ''}! 😊
 ברוכים הבאים לעדשה מקומית 📸
 
-אתם מוזמנים לשלוח את התמונות.
-כשסיימתם לשלוח — כתבו *סיום* ואת מספר התמונות ששלחתם.
-לדוגמה: אם שלחתם 23 תמונות, כתבו *סיום 23*`;
+שלחו את התמונות.
+כשסיימתם — כתבו *סיום* ואת מספר התמונות.
+לדוגמה: *סיום 23*`;
 }
 
 // ─── פרומפט AI ────────────────────────────────────────────
@@ -172,11 +191,11 @@ const SYSTEM_PROMPT = `אתה סוכן מכירות של עדשה מקומית -
 
 כללים:
 - אל תשאל שם
-- אל תגיב על תמונות
+- אל תגיב על תמונות בנפרד
 - אל תכתוב "ההזמנה התקבלה" לפני שיש גודל + גימור + סניף
 - תמונות מעל 15×21 → https://www.adsale.co.il`;
 
-// ─── שיחה ─────────────────────────────────────────────────
+// ─── ניהול שיחות ──────────────────────────────────────────
 function getConversation(phone, name) {
   if (!conversations[phone]) {
     conversations[phone] = {
@@ -184,7 +203,7 @@ function getConversation(phone, name) {
       messages: [], imageCount: 0, expectedImages: null,
       imagesConfirmed: false, size: null, paperType: null,
       frame: null, orderCreated: false, greeted: false,
-      imageUrls: [],
+      localImagePaths: [],
     };
   }
   if (name && !conversations[phone].customerName) conversations[phone].customerName = name;
@@ -215,19 +234,13 @@ async function extractOrderDetails(conv) {
   const history = conv.messages.slice(-20).map(m =>
     `${m.role === 'user' ? 'לקוח' : 'חנות'}: ${m.content}`
   ).join('\n');
-
   const resp = await anthropic.messages.create({
     model: 'claude-haiku-4-5', max_tokens: 400,
     system: 'Extract print order details from Hebrew WhatsApp conversation. Return ONLY valid JSON.',
     messages: [{ role: 'user', content: `שם: ${conv.customerName} | סניף: ${conv.branch}\nשיחה:\n${history}\nJSON: {"customer_name":"...","branch":"...","size":"...","paper_type":"מבריק/מט","frame":true/false,"image_count":0,"total_price":0,"upgrade_product":null}` }]
   });
-
-  try {
-    return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, ''));
-  } catch(e) {
-    console.error('❌ JSON parse:', e.message);
-    return null;
-  }
+  try { return JSON.parse(resp.content[0].text.trim().replace(/```json?|```/g, '')); }
+  catch(e) { console.error('❌ JSON parse:', e.message); return null; }
 }
 
 async function createPrintOrder(conv, details) {
@@ -239,35 +252,21 @@ async function createPrintOrder(conv, details) {
   const count  = conv.expectedImages || conv.imageCount || 0;
   const price  = details?.total_price || 0;
 
-  // נקה מספר טלפון לפורמט ישראלי
-  // נקה מספר טלפון לפורמט ישראלי (05XXXXXXXX)
   const rawPhone = conv.phone.replace(/\D/g, '');
-  let cleanPhone;
-  if (rawPhone.startsWith('972')) {
-    cleanPhone = '0' + rawPhone.slice(3);
-  } else if (rawPhone.startsWith('0')) {
-    cleanPhone = rawPhone;
-  } else {
-    cleanPhone = '0' + rawPhone;
-  }
-  console.log(`📞 טלפון: ${conv.phone} → ${cleanPhone}`);
+  let cleanPhone = rawPhone.startsWith('972') ? '0' + rawPhone.slice(3) : rawPhone.startsWith('0') ? rawPhone : '0' + rawPhone;
+  console.log(`📞 ${conv.phone} → ${cleanPhone}`);
 
-  // בנה notes עם קישורי תמונות
-  const imagesList = conv.imageUrls.length > 0
-    ? `\nתמונות (${conv.imageUrls.length}):\n` + conv.imageUrls.join('\n')
-    : '';
-  const notesText = [branch ? `סניף: ${branch}` : '', imagesList].filter(Boolean).join('\n');
+  // הנתיב המקומי לתמונות ב-Railway
+  const phoneDir = path.join(IMAGES_DIR, rawPhone);
+  const notesText = `סניף: ${branch || 'לא צוין'}\nתמונות ב-Railway: ${phoneDir}\nכמות: ${conv.localImagePaths.length}`;
 
   const payload = {
     customer_name: name,
     customer_phone: cleanPhone,
     image_count: count,
     total_images: count,
-    size: size,
-    paper_type: paper,
-    frame: frame,
-    total_price: price,
-    total_amount: price,
+    size, paper_type: paper, frame,
+    total_price: price, total_amount: price,
     notes: notesText,
     vendor_id: VENDOR_ID,
     source: 'whatsapp',
@@ -294,35 +293,21 @@ async function getAIResponse(conv, userMessage) {
 
 // ─── WhatsApp Client ───────────────────────────────────────
 const client = new Client({
-  authStrategy: new LocalAuth({ 
-    dataPath: './.wwebjs_auth',
-    clientId: 'adasha-bot'
-  }),
+  authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth', clientId: 'adasha-bot' }),
   puppeteer: {
     headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--no-first-run',
-      '--no-default-browser-check',
-      '--disable-background-networking',
-    ],
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
+           '--disable-gpu','--no-first-run','--single-process'],
   },
 });
 
 client.on('qr', (qr) => {
   currentQR = qr;
-  console.log('\n══════════════════════════════════════════');
-  console.log('   📱 QR מוכן! פתח בדפדפן: /qr');
-  console.log('══════════════════════════════════════════\n');
+  console.log('📱 QR מוכן! פתח: /qr');
   qrcode.generate(qr, { small: true });
 });
-
-client.on('authenticated', () => { currentQR = null; console.log('🔐 אומת בהצלחה!'); });
-client.on('ready', () => { currentQR = null; console.log('\n✅ Bot מוכן — עדשה מקומית\n'); });
+client.on('authenticated', () => { currentQR = null; console.log('🔐 אומת!'); });
+client.on('ready', () => { currentQR = null; console.log('✅ Bot מוכן!'); });
 client.on('auth_failure', msg => console.error('❌ אימות נכשל:', msg));
 client.on('disconnected', reason => {
   console.warn('⚠️ התנתק:', reason);
@@ -338,27 +323,20 @@ client.on('message', async (msg) => {
     const name = contact.pushname || contact.name || null;
     const conv = getConversation(phone, name);
 
-    // טיפול בתמונות
+    // תמונה — שמור ל-Railway
     if (msg.hasMedia && msg.type === 'image') {
       conv.imageCount++;
-      console.log(`📸 #${conv.imageCount} מ-${name || phone}`);
+      console.log(`📸 תמונה #${conv.imageCount} מ-${name || phone}`);
       try {
         const media = await msg.downloadMedia();
-        if (media && media.data) {
+        if (media?.data) {
           const imgBuffer = Buffer.from(media.data, 'base64');
           const ext = media.mimetype.includes('jpeg') ? 'jpg' : 'png';
-          const filename = `wa_${phone}_img${conv.imageCount}.${ext}`;
-          const fileUrl = await uploadImage(imgBuffer, filename, media.mimetype);
-          if (fileUrl) {
-            conv.imageUrls.push(fileUrl);
-            console.log(`✅ תמונה #${conv.imageCount}: ${fileUrl}`);
-          } else {
-            console.log(`⚠️ תמונה #${conv.imageCount} לא הועלתה`);
-          }
+          const filepath = saveImageLocally(phone.replace(/\D/g,''), imgBuffer, ext);
+          conv.localImagePaths.push(filepath);
+          console.log(`💾 נשמר: ${filepath}`);
         }
-      } catch(imgErr) {
-        console.error('❌ שגיאת תמונה:', imgErr.message);
-      }
+      } catch(e) { console.error('❌ שגיאת תמונה:', e.message); }
       return;
     }
 
@@ -366,7 +344,6 @@ client.on('message', async (msg) => {
     if (!text) return;
     console.log(`💬 ${name || phone}: ${text}`);
 
-    // reset שיחה
     if (text.toLowerCase() === 'reset' || text === 'איפוס') {
       delete conversations[phone];
       await msg.reply('✅ השיחה אופסה.');
@@ -385,12 +362,7 @@ client.on('message', async (msg) => {
     if (declared !== null && !conv.imagesConfirmed) {
       conv.expectedImages = declared;
       conv.imagesConfirmed = true;
-      const orderMsg = `קיבלתי ${declared} תמונות! 📸
-
-באיזה גודל, גימור וסניף תרצה?
-• גודל: 10×15 (₪1.80) | 13×18 (₪3.50) | 15×21 (₪10) | 20×30 (₪23)
-• גימור: מבריק או מט | עם מסגרת או בלי
-• סניף: רעננה או משמר השרון`;
+      const orderMsg = `קיבלתי ${declared} תמונות! 📸\n\nבאיזה גודל, גימור וסניף תרצה?\n• גודל: 10×15 (₪1.80) | 13×18 (₪3.50) | 15×21 (₪10) | 20×30 (₪23)\n• גימור: מבריק או מט | עם מסגרת או בלי\n• סניף: רעננה או משמר השרון`;
       conv.messages.push({ role: 'assistant', content: orderMsg });
       await msg.reply(orderMsg);
       return;
@@ -403,29 +375,18 @@ client.on('message', async (msg) => {
       try {
         const details = await extractOrderDetails(conv);
         await createPrintOrder(conv, details);
-      } catch(e) {
-        console.error('❌ שגיאה ביצירת הזמנה:', e.message);
-      }
+      } catch(e) { console.error('❌ שגיאה ביצירת הזמנה:', e.message); }
     }
 
     await msg.reply(reply);
-  } catch(err) {
-    console.error('❌ שגיאה:', err.message);
-  }
+  } catch(err) { console.error('❌ שגיאה:', err.message); }
 });
 
-// מחק lock files ישנים לפני initialize
-const fs = require('fs');
-const lockPaths = [
-  './.wwebjs_auth/puppeteer_profile/SingletonLock',
-  './.wwebjs_auth/puppeteer_profile/SingletonCookie',
-  './.wwebjs_auth/puppeteer_profile/SingletonSocket',
-  './.wwebjs_auth/session-adasha-bot/SingletonLock',
-  './.wwebjs_auth/session-adasha-bot/SingletonCookie',
-  './.wwebjs_auth/session-adasha-bot/SingletonSocket',
-];
-lockPaths.forEach(f => {
+// מחק locks ישנים
+['/app/.wwebjs_auth/session-adasha-bot/SingletonLock',
+ '/app/.wwebjs_auth/session-adasha-bot/SingletonCookie'].forEach(f => {
   try { fs.unlinkSync(f); console.log('🗑️ מחק lock:', f); } catch(e) {}
 });
 
 client.initialize();
+console.log('🚀 מאתחל בוט...');
