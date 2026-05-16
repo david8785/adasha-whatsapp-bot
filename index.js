@@ -24,6 +24,7 @@ if (!fs.existsSync(IMAGES_DIR)) { fs.mkdirSync(IMAGES_DIR, { recursive: true });
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 const conversations = {};
 let currentQR = null;
+let connectedPhone = null;
 
 // ─── HTTP request helper ───────────────────────────────────
 function httpsRequest(url, options, bodyBuffer) {
@@ -73,6 +74,17 @@ function saveImageLocally(phone, imgBuffer, ext) {
 // ─── HTTP Server ───────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   const url = req.url;
+
+  // STATUS
+  if (url === '/status') {
+    res.writeHead(200, {'Content-Type': 'application/json'});
+    res.end(JSON.stringify({
+      connected: !currentQR,
+      phone: connectedPhone || 'לא ידוע',
+      active_chats: Object.keys(conversations).length
+    }));
+    return;
+  }
 
   // QR page
   if (url === '/qr') {
@@ -317,7 +329,13 @@ client.on('qr', (qr) => {
   qrcode.generate(qr, { small: true });
 });
 client.on('authenticated', () => { currentQR = null; console.log('🔐 אומת!'); });
-client.on('ready', () => { currentQR = null; console.log('✅ Bot מוכן!'); });
+client.on('ready', async () => {
+  currentQR = null;
+  try {
+    connectedPhone = client.info.wid.user;
+    console.log('✅ Bot מוכן! מספר: ' + connectedPhone);
+  } catch(e) { console.log('✅ Bot מוכן!'); }
+});
 client.on('auth_failure', msg => console.error('❌ אימות נכשל:', msg));
 client.on('disconnected', reason => {
   console.warn('⚠️ התנתק:', reason);
@@ -404,3 +422,6 @@ LOCK_FILES.forEach(f => {
 
 client.initialize();
 console.log('🚀 מאתחל בוט...');
+
+// ─── STATUS endpoint (הוסף לserver) ──────────────────────
+// נוסיף את זה ע"י override של server
