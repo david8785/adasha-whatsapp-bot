@@ -283,9 +283,13 @@ async function getAIResponse(conv, userMessage) {
 
 // ─── WhatsApp Client ───────────────────────────────────────
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
+  authStrategy: new LocalAuth({ 
+    dataPath: './.wwebjs_auth',
+    clientId: 'adasha-bot'
+  }),
   puppeteer: {
     headless: true,
+    userDataDir: './.wwebjs_auth/puppeteer_profile',
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -296,6 +300,7 @@ const client = new Client({
       '--no-default-browser-check',
       '--disable-background-networking',
       '--remote-debugging-port=0',
+      '--disable-features=site-per-process',
     ],
   },
 });
@@ -401,14 +406,16 @@ client.on('message', async (msg) => {
 
 // מחק lock files ישנים לפני initialize
 const fs = require('fs');
-const authPath = './.wwebjs_auth';
-try {
-  const lockFiles = [
-    `${authPath}/session/SingletonLock`,
-    `${authPath}/session/SingletonCookie`,
-    `${authPath}/session/SingletonSocket`,
-  ];
-  lockFiles.forEach(f => { try { fs.unlinkSync(f); console.log('🗑️ מחק lock:', f); } catch(e) {} });
-} catch(e) {}
+const lockPaths = [
+  './.wwebjs_auth/puppeteer_profile/SingletonLock',
+  './.wwebjs_auth/puppeteer_profile/SingletonCookie',
+  './.wwebjs_auth/puppeteer_profile/SingletonSocket',
+  './.wwebjs_auth/session-adasha-bot/SingletonLock',
+  './.wwebjs_auth/session-adasha-bot/SingletonCookie',
+  './.wwebjs_auth/session-adasha-bot/SingletonSocket',
+];
+lockPaths.forEach(f => {
+  try { fs.unlinkSync(f); console.log('🗑️ מחק lock:', f); } catch(e) {}
+});
 
 client.initialize();
