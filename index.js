@@ -66,19 +66,21 @@ async function storeAIxApi(endpoint, method = 'GET', body = null) {
 // ─── Upload image to Base44 ───────────────────────────────
 async function uploadImage(imgBuffer, filename, mimetype) {
   try {
-    const boundary = '----WaBotBoundary' + Date.now();
-    const hdr = Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`
+    // העלאה ל-Litterbox (חינמי, 72 שעות, ללא API key)
+    const boundary = '----LitterboxBoundary' + Date.now();
+    const part1 = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="reqtype"\r\n\r\nfileupload\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="time"\r\n\r\n72h\r\n` +
+      `--${boundary}\r\nContent-Disposition: form-data; name="fileToUpload"; filename="${filename}"\r\nContent-Type: ${mimetype}\r\n\r\n`
     );
-    const ftr = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const bodyBuf = Buffer.concat([hdr, imgBuffer, ftr]);
+    const part2 = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const bodyBuf = Buffer.concat([part1, imgBuffer, part2]);
 
     const res = await httpsRequest(
-      `${STOREAIX_BASE}/files/upload`,
+      'https://litterbox.catbox.moe/resources/internals/api.php',
       {
         method: 'POST',
         headers: {
-          'api-key': STOREAIX_API_KEY,
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
           'Content-Length': bodyBuf.length,
         },
@@ -86,11 +88,10 @@ async function uploadImage(imgBuffer, filename, mimetype) {
       bodyBuf
     );
 
-    if (res.status === 200 || res.status === 201) {
-      const data = JSON.parse(res.body);
-      return data.file_url || data.url || null;
+    if (res.status === 200 && res.body.startsWith('https://')) {
+      return res.body.trim();
     }
-    console.log(`⚠️ העלאה נכשלה ${res.status}: ${res.body.substring(0, 100)}`);
+    console.log(`⚠️ Litterbox נכשל ${res.status}: ${res.body.substring(0, 100)}`);
     return null;
   } catch (e) {
     console.error('❌ שגיאת upload:', e.message);
@@ -239,7 +240,17 @@ async function createPrintOrder(conv, details) {
   const price  = details?.total_price || 0;
 
   // נקה מספר טלפון לפורמט ישראלי
-  const cleanPhone = conv.phone.replace(/^972/, '0').replace(/\D/g, '');
+  // נקה מספר טלפון לפורמט ישראלי (05XXXXXXXX)
+  const rawPhone = conv.phone.replace(/\D/g, '');
+  let cleanPhone;
+  if (rawPhone.startsWith('972')) {
+    cleanPhone = '0' + rawPhone.slice(3);
+  } else if (rawPhone.startsWith('0')) {
+    cleanPhone = rawPhone;
+  } else {
+    cleanPhone = '0' + rawPhone;
+  }
+  console.log(`📞 טלפון: ${conv.phone} → ${cleanPhone}`);
 
   // בנה notes עם קישורי תמונות
   const imagesList = conv.imageUrls.length > 0
@@ -340,7 +351,9 @@ client.on('message', async (msg) => {
           const fileUrl = await uploadImage(imgBuffer, filename, media.mimetype);
           if (fileUrl) {
             conv.imageUrls.push(fileUrl);
-            console.log(`✅ תמונה #${conv.imageCount} הועלתה`);
+            console.log(`✅ תמונה #${conv.imageCount}: ${fileUrl}`);
+          } else {
+            console.log(`⚠️ תמונה #${conv.imageCount} לא הועלתה`);
           }
         }
       } catch(imgErr) {
